@@ -1,0 +1,12 @@
+# Deny direct access to JSON files
+# Apache 2.4 syntax (preferred)
+<FilesMatch "\.json$">
+    Require all denied
+</FilesMatch>
+
+# Apache 2.2 fallback (uncomment if needed)
+# <FilesMatch "\.json$">
+#     Order allow,deny
+#     Deny from all
+# </FilesMatch>
+
