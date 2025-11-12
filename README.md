@@ -1,6 +1,15 @@
 # Secret Santa / Hemlig Tomte
 
-En enkel och användarvänlig Secret Santa-presentutbyteshanteringssystem byggt med PHP. Perfekt för att organisera presentutbyten med vänner, familj eller kollegor.
+ En varm och enkel Hemlig Tomte-app i PHP.
+ Perfekt för att ordna julens presentutbyte med vänner, familj eller kollegor, helt privat och utan krångel. 
+
+## Skärmdumpar
+
+### Adminpanel
+![Adminpanel](screenshot_admin.png)
+
+### Användarvy 
+![Användarvy](screenshot_user.png)
 
 ## Funktioner
 
