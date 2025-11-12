@@ -6,25 +6,56 @@ README: index.php — Login page for admin and users.
 - Uses PHP sessions; includes minimal HTML/CSS and JS validation.
 */
 
-session_start();
 require_once __DIR__ . '/inc.php';
 
 // Simple helpers
 function redirect($to) { header("Location: $to"); exit; }
-function read_json($path) { if (!file_exists($path)) return []; $j = file_get_contents($path); $d = json_decode($j, true); return is_array($d) ? $d : []; }
-function write_json($path, $data) { file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES), LOCK_EX); }
+function read_json($path) { 
+    // Use the improved read_json_assoc if available, otherwise fallback
+    if (function_exists('read_json_assoc')) {
+        return read_json_assoc($path);
+    }
+    if (!file_exists($path)) return []; 
+    $j = file_get_contents($path); 
+    $d = json_decode($j, true); 
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        return [];
+    }
+    return is_array($d) ? $d : []; 
+}
+function write_json($path, $data) { 
+    // Use the improved write_json_assoc if available, otherwise fallback
+    if (function_exists('write_json_assoc')) {
+        return write_json_assoc($path, $data);
+    }
+    $result = file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES), LOCK_EX);
+    if ($result !== false && file_exists($path)) {
+        chmod($path, DATA_FILE_PERMISSIONS);
+    }
+    return $result;
+}
 
 // Ensure data directory exists (first run convenience)
-if (!is_dir(__DIR__ . '/data')) { @mkdir(__DIR__ . '/data', 0777, true); }
-if (!file_exists(__DIR__ . '/data/users.json')) { write_json(__DIR__ . '/data/users.json', []); }
-if (!file_exists(__DIR__ . '/data/pairs.json')) { file_put_contents(__DIR__ . '/data/pairs.json', json_encode(new stdClass(), JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)); }
+if (!is_dir(__DIR__ . '/data')) { 
+    @mkdir(__DIR__ . '/data', DATA_DIR_PERMISSIONS, true);
+    if (is_dir(__DIR__ . '/data')) {
+        chmod(__DIR__ . '/data', DATA_DIR_PERMISSIONS);
+    }
+}
+if (!file_exists(__DIR__ . '/data/users.json')) { 
+    write_json(__DIR__ . '/data/users.json', []); 
+}
+if (!file_exists(__DIR__ . '/data/pairs.json')) { 
+    file_put_contents(__DIR__ . '/data/pairs.json', json_encode(new stdClass(), JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    chmod(__DIR__ . '/data/pairs.json', DATA_FILE_PERMISSIONS);
+}
 
 // Check if admin user exists
 $usersPath = __DIR__ . '/data/users.json';
 $users = read_json($usersPath);
 $adminExists = false;
 foreach ($users as $u) {
-    if (isset($u['username']) && $u['username'] === 'admin') {
+    if (isset($u['username']) && normalize_username($u['username']) === 'admin') {
         $adminExists = true;
         break;
     }
@@ -46,53 +77,90 @@ $isSetup = !$adminExists;
 
 // Handle admin account creation (setup)
 if ($isSetup && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'setup') {
-    $username = trim(strtolower($_POST['username'] ?? ''));
-    $password = (string)($_POST['password'] ?? '');
-    $passwordConfirm = (string)($_POST['password_confirm'] ?? '');
-
-    // Force username to be 'admin'
-    if ($username !== 'admin') {
-        $error = 'Username must be "admin" for admin privileges.';
-    } elseif ($password !== $passwordConfirm) {
-        $error = 'Passwords do not match.';
-    } elseif (strlen($password) < 4) {
-        $error = 'Password must be at least 4 characters.';
+    // CSRF protection
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
     } else {
-        // Create admin user
-        $users = read_json($usersPath);
-        $users[] = [
-            'username' => 'admin',
-            'password' => password_hash($password, PASSWORD_DEFAULT),
-            'interests' => ''
-        ];
-        write_json($usersPath, $users);
-        // Auto-login as admin
-        $_SESSION['admin'] = true;
-        redirect('admin.php');
+        $username = normalize_username($_POST['username'] ?? '');
+        $password = (string)($_POST['password'] ?? '');
+        $passwordConfirm = (string)($_POST['password_confirm'] ?? '');
+
+        // Force username to be 'admin'
+        if ($username !== 'admin') {
+            $error = 'Username must be "admin" for admin privileges.';
+        } elseif ($password !== $passwordConfirm) {
+            $error = 'Passwords do not match.';
+        } elseif (!validate_password($password)) {
+            $error = 'Password must be at least ' . MIN_PASSWORD_LENGTH . ' characters.';
+        } else {
+            // Create admin user
+            $users = read_json($usersPath);
+            $users[] = [
+                'username' => 'admin',
+                'password' => password_hash($password, PASSWORD_DEFAULT),
+                'interests' => ''
+            ];
+            write_json($usersPath, $users);
+            log_activity('ADMIN_CREATED', 'Initial admin account created');
+            // Auto-login as admin with secure session
+            secure_session_regenerate();
+            $_SESSION['admin'] = true;
+            redirect('admin.php');
+        }
     }
 }
 
 // Handle login
 if (!$isSetup && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = trim($_POST['username'] ?? '');
-    $password = (string)($_POST['password'] ?? '');
-
-    // All users (including admin) authenticate via users.json
-    $users = read_json($usersPath);
-    $found = null;
-    foreach ($users as $u) {
-        if (isset($u['username']) && $u['username'] === $username) { $found = $u; break; }
-    }
-    if ($found && isset($found['password']) && password_verify($password, $found['password'])) {
-        if ($username === 'admin') {
-            $_SESSION['admin'] = true;
-            redirect('admin.php');
-        } else {
-            $_SESSION['user'] = $username;
-            redirect('view.php');
-        }
+    // CSRF protection
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
     } else {
-        $error = 'Invalid username or password.';
+        $username = normalize_username($_POST['username'] ?? '');
+        $password = (string)($_POST['password'] ?? '');
+        
+        // Rate limiting
+        $rateLimit = check_rate_limit($username);
+        if (!$rateLimit['allowed']) {
+            $minutes = ceil($rateLimit['remaining'] / 60);
+            $error = "Too many failed login attempts. Please try again in {$minutes} minute(s).";
+        } else {
+            // All users (including admin) authenticate via users.json
+            $users = read_json($usersPath);
+            $found = null;
+            foreach ($users as $u) {
+                if (isset($u['username']) && normalize_username($u['username']) === $username) { 
+                    $found = $u; 
+                    break; 
+                }
+            }
+            
+            if ($found && isset($found['password']) && password_verify($password, $found['password'])) {
+                // Check if account is active (admin is always active)
+                if ($username !== 'admin' && isset($found['active']) && $found['active'] === false) {
+                    $error = t('account_inactive');
+                    log_activity('LOGIN_ATTEMPT_INACTIVE', "Username: {$username}", $username);
+                } else {
+                    // Successful login - clear rate limit and regenerate session
+                    clear_rate_limit($username);
+                    secure_session_regenerate();
+                    log_activity('LOGIN_SUCCESS', "Username: {$username}", $username);
+                    
+                    if ($username === 'admin') {
+                        $_SESSION['admin'] = true;
+                        redirect('admin.php');
+                    } else {
+                        $_SESSION['user'] = $username;
+                        redirect('view.php');
+                    }
+                }
+            } else {
+                // Failed login - record attempt
+                record_failed_attempt($username);
+                log_activity('LOGIN_FAILED', "Username: {$username}", $username);
+                $error = 'Invalid username or password.';
+            }
+        }
     }
 }
 ?>
@@ -148,6 +216,7 @@ if (!$isSetup && $_SERVER['REQUEST_METHOD'] === 'POST') {
         <p class="sub"><?= t('setup_sub') ?></p>
         <form id="setup" method="post" novalidate>
           <input type="hidden" name="action" value="setup">
+          <?= csrf_field() ?>
           <div class="field">
             <label for="username"><?= t('username') ?></label>
             <input id="username" name="username" type="text" required autocomplete="username" value="admin" readonly style="background:#f5f5f5; cursor:not-allowed;"/>
@@ -167,6 +236,7 @@ if (!$isSetup && $_SERVER['REQUEST_METHOD'] === 'POST') {
       <?php else: ?>
         <p class="sub"><?= t('login_sub') ?></p>
         <form id="login" method="post" novalidate>
+          <?= csrf_field() ?>
           <div class="field">
             <label for="username"><?= t('username') ?></label>
             <input id="username" name="username" type="text" required autocomplete="username"/>
@@ -178,7 +248,10 @@ if (!$isSetup && $_SERVER['REQUEST_METHOD'] === 'POST') {
           <button class="btn" type="submit">✨ <?= t('login') ?> ✨</button>
           <?php if ($error): ?><div class="msg"><?= htmlspecialchars($error) ?></div><?php endif; ?>
         </form>
-        <div class="foot">🎅 <?= t('new_here') ?></div>
+        <div class="foot">
+          <a href="register.php"><?= t('register') ?></a> | 
+          <a href="reset.php"><?= t('forgot_password') ?></a>
+        </div>
       <?php endif; ?>
     </div>
   </div>

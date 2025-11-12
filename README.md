@@ -44,6 +44,8 @@ Vid första besöket kommer du att bli ombedd att skapa ett admin-konto:
 - Användarnamn: `admin` (fastställt)
 - Lösenord: Välj ditt eget lösenord (ex hunter2)
 
+**Obs:** Om det finns exempelanvändare i `data/users.json` (t.ex. alice, bob, carol), så har dessa lösenordet `password`.
+
 ## Användning
 
 ### Adminpanel

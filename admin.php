@@ -7,15 +7,13 @@ README: admin.php — Admin panel to manage users and run the Secret Santa draw.
 - Does NOT reveal matches; only users can see their own assignment.
 */
 
-session_start();
 require_once __DIR__ . '/inc.php';
 if (empty($_SESSION['admin'])) { header('Location: index.php'); exit; }
 
 $usersPath = __DIR__ . '/data/users.json';
 $pairsPath = __DIR__ . '/data/pairs.json';
 
-function read_json_assoc($path){ if (!file_exists($path)) return []; $d = json_decode(file_get_contents($path), true); return is_array($d) ? $d : []; }
-function write_json_assoc($path, $data){ file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES), LOCK_EX); }
+// JSON functions are defined in inc.php with retry logic and corruption recovery
 
 // Groups helpers
 function load_groups($path){
@@ -41,79 +39,197 @@ if (!empty($_SESSION['flash_err'])) { $error = $_SESSION['flash_err']; unset($_S
 
 // Add user
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action']==='add') {
-    $newUser = trim(strtolower($_POST['username'] ?? ''));
-    $plainIn = (string)($_POST['password'] ?? '');
-    if (!$newUser || !preg_match('/^[a-z0-9_\-]{2,32}$/', $newUser)) {
-        $error = 'Invalid username. Use 2-32 chars: a-z, 0-9, _ or -';
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
     } else {
-        foreach ($users as $u) { if ($u['username'] === $newUser) { $error = 'User already exists.'; break; } }
-        if (!$error) {
-            $plain = trim($plainIn) !== '' ? $plainIn : substr(bin2hex(random_bytes(8)), 0, 8);
-            if (strlen($plain) < 4) { $error = 'Password must be at least 4 characters.'; }
-        }
-        if (!$error) {
-            $hash = password_hash($plain, PASSWORD_DEFAULT);
-            $users[] = ['username'=>$newUser, 'password'=>$hash, 'interests'=>''];
-            write_json_assoc($usersPath, $users);
-            $message = 'User "' . htmlspecialchars($newUser) . '" added with password: ' . htmlspecialchars($plain);
+        $newUser = normalize_username($_POST['username'] ?? '');
+        $plainIn = (string)($_POST['password'] ?? '');
+        if (!validate_username($newUser)) {
+            $error = 'Invalid username. Use 2-32 chars: a-z, 0-9, _ or -';
+        } else {
+            foreach ($users as $u) { 
+                if (normalize_username($u['username']) === $newUser) { 
+                    $error = 'User already exists.'; 
+                    break; 
+                } 
+            }
+            if (!$error) {
+                $plain = trim($plainIn) !== '' ? $plainIn : substr(bin2hex(random_bytes(8)), 0, 8);
+                if (!validate_password($plain)) { 
+                    $error = 'Password must be at least ' . MIN_PASSWORD_LENGTH . ' characters.'; 
+                }
+            }
+            if (!$error) {
+                $hash = password_hash($plain, PASSWORD_DEFAULT);
+                // Ensure username is normalized before storing
+                $users[] = ['username'=>$newUser, 'password'=>$hash, 'interests'=>'', 'active'=>true];
+                write_json_assoc($usersPath, $users);
+                log_activity('USER_ADDED', "Username: {$newUser}", 'admin');
+                $message = 'User "' . htmlspecialchars($newUser) . '" added with password: ' . htmlspecialchars($plain);
+            }
         }
     }
 }
 
 // Delete user
 if (isset($_GET['del'])) {
-    $del = trim(strtolower($_GET['del']));
+    $del = normalize_username($_GET['del']);
     if ($del === 'admin') {
         $error = 'Cannot delete admin user.';
     } else {
         $before = count($users);
-        $users = array_values(array_filter($users, function($u) use ($del){ return $u['username'] !== $del; }));
-        if (count($users) !== $before) { write_json_assoc($usersPath, $users); $message = 'Deleted user: ' . htmlspecialchars($del); }
-        else { $error = 'User not found.'; }
+        $users = array_values(array_filter($users, function($u) use ($del){ 
+            return normalize_username($u['username']) !== $del; 
+        }));
+        if (count($users) !== $before) { 
+            write_json_assoc($usersPath, $users); 
+            log_activity('USER_DELETED', "Username: {$del}", 'admin');
+            $message = 'Deleted user: ' . htmlspecialchars($del); 
+        } else { 
+            $error = 'User not found.'; 
+        }
     }
 }
 
 // Change/reset password for a user
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'resetpw') {
-    $uname = trim(strtolower($_POST['username'] ?? ''));
-    $plainIn = (string)($_POST['password'] ?? '');
-    $found = false;
-    for ($i=0; $i<count($users); $i++) {
-        if (($users[$i]['username'] ?? '') === $uname) {
-            $found = true;
-            $plain = trim($plainIn) !== '' ? $plainIn : substr(bin2hex(random_bytes(8)), 0, 8);
-            if (strlen($plain) < 4) { $error = 'Password must be at least 4 characters.'; break; }
-            $users[$i]['password'] = password_hash($plain, PASSWORD_DEFAULT);
-            write_json_assoc($usersPath, $users);
-            $message = 'Password for "' . htmlspecialchars($uname) . '" set to: ' . htmlspecialchars($plain);
-            break;
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $uname = normalize_username($_POST['username'] ?? '');
+        $plainIn = (string)($_POST['password'] ?? '');
+        $found = false;
+        for ($i=0; $i<count($users); $i++) {
+            if (normalize_username($users[$i]['username'] ?? '') === $uname) {
+                $found = true;
+                $plain = trim($plainIn) !== '' ? $plainIn : substr(bin2hex(random_bytes(8)), 0, 8);
+                if (!validate_password($plain)) { 
+                    $error = 'Password must be at least ' . MIN_PASSWORD_LENGTH . ' characters.'; 
+                    break; 
+                }
+                $users[$i]['password'] = password_hash($plain, PASSWORD_DEFAULT);
+                write_json_assoc($usersPath, $users);
+                log_activity('PASSWORD_CHANGED', "Username: {$uname}", 'admin');
+                $message = 'Password for "' . htmlspecialchars($uname) . '" set to: ' . htmlspecialchars($plain);
+                break;
+            }
         }
+        if (!$found) { $error = 'User not found.'; }
     }
-    if (!$found) { $error = 'User not found.'; }
 }
 
 // Group actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action']==='set_active') {
-    $name = trim((string)($_POST['name'] ?? ''));
-    for ($i=0; $i<count($groups); $i++) { $groups[$i]['active'] = ($groups[$i]['name'] === $name); }
-    save_groups($pairsPath, $groups);
-    $message = 'Active draw set to ' . htmlspecialchars($name);
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $name = trim((string)($_POST['name'] ?? ''));
+        for ($i=0; $i<count($groups); $i++) { $groups[$i]['active'] = ($groups[$i]['name'] === $name); }
+        save_groups($pairsPath, $groups);
+        log_activity('DRAW_ACTIVATED', "Draw: {$name}", 'admin');
+        $message = 'Active draw set to ' . htmlspecialchars($name);
+    }
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action']==='archive') {
-    $name = trim((string)($_POST['name'] ?? ''));
-    $found = false;
-    for ($i=0; $i<count($groups); $i++) {
-        if ($groups[$i]['name'] === $name) { $groups[$i]['active'] = false; $found = true; }
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $name = trim((string)($_POST['name'] ?? ''));
+        $found = false;
+        for ($i=0; $i<count($groups); $i++) {
+            if ($groups[$i]['name'] === $name) { $groups[$i]['active'] = false; $found = true; }
+        }
+        if ($found) { 
+            save_groups($pairsPath, $groups); 
+            log_activity('DRAW_ARCHIVED', "Draw: {$name}", 'admin');
+            $message = 'Archived draw ' . htmlspecialchars($name); 
+        } else { 
+            $error = 'Draw not found.'; 
+        }
     }
-    if ($found) { save_groups($pairsPath, $groups); $message = 'Archived draw ' . htmlspecialchars($name); }
-    else { $error = 'Draw not found.'; }
 }
 if (isset($_GET['delgroup'])) {
     $name = trim((string)$_GET['delgroup']);
     $before = count($groups);
     $groups = array_values(array_filter($groups, function($g) use ($name){ return $g['name'] !== $name; }));
-    if (count($groups) !== $before) { save_groups($pairsPath, $groups); $message = 'Deleted draw ' . htmlspecialchars($name); }
-    else { $error = 'Draw not found.'; }
+    if (count($groups) !== $before) { 
+        save_groups($pairsPath, $groups); 
+        log_activity('DRAW_DELETED', "Draw: {$name}", 'admin');
+        $message = 'Deleted draw ' . htmlspecialchars($name); 
+    } else { 
+        $error = 'Draw not found.'; 
+    }
+}
+
+// Activate/Deactivate user
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'toggle_active') {
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $uname = normalize_username($_POST['username'] ?? '');
+        if ($uname === 'admin') {
+            $error = 'Cannot change admin account status.';
+        } else {
+            $found = false;
+            for ($i=0; $i<count($users); $i++) {
+                if (normalize_username($users[$i]['username']) === $uname) {
+                    $wasActive = isset($users[$i]['active']) && $users[$i]['active'] === true;
+                    $users[$i]['active'] = !$wasActive;
+                    write_json_assoc($usersPath, $users);
+                    log_activity($wasActive ? 'USER_DEACTIVATED' : 'USER_ACTIVATED', "Username: {$uname}", 'admin');
+                    $message = ($wasActive ? 'Deactivated' : 'Activated') . ' user: ' . htmlspecialchars($uname);
+                    $found = true;
+                    break;
+                }
+            }
+            if (!$found) { $error = 'User not found.'; }
+        }
+    }
+}
+
+// Handle password reset approval
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'approve_reset') {
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $uname = normalize_username($_POST['username'] ?? '');
+        $plainIn = (string)($_POST['password'] ?? '');
+        
+        if (!$uname) {
+            $error = 'Username required.';
+        } else {
+            $plain = trim($plainIn) !== '' ? $plainIn : substr(bin2hex(random_bytes(8)), 0, 8);
+            if (!validate_password($plain)) { 
+                $error = 'Password must be at least ' . MIN_PASSWORD_LENGTH . ' characters.'; 
+            } else {
+                $found = false;
+                for ($i=0; $i<count($users); $i++) {
+                    if (normalize_username($users[$i]['username']) === $uname) {
+                        $users[$i]['password'] = password_hash($plain, PASSWORD_DEFAULT);
+                        write_json_assoc($usersPath, $users);
+                        remove_reset_request($uname);
+                        log_activity('PASSWORD_RESET_APPROVED', "Username: {$uname}", 'admin');
+                        $message = 'Password reset approved for "' . htmlspecialchars($uname) . '". New password: ' . htmlspecialchars($plain);
+                        $found = true;
+                        break;
+                    }
+                }
+                if (!$found) { $error = 'User not found.'; }
+            }
+        }
+    }
+}
+
+// Handle password reset rejection
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'reject_reset') {
+    if (!validate_csrf()) {
+        $error = 'Invalid security token. Please try again.';
+    } else {
+        $uname = normalize_username($_POST['username'] ?? '');
+        remove_reset_request($uname);
+        log_activity('PASSWORD_RESET_REJECTED', "Username: {$uname}", 'admin');
+        $message = 'Password reset request rejected for "' . htmlspecialchars($uname) . '".';
+    }
 }
 
 // Reload after mutations
@@ -164,6 +280,7 @@ $active = get_active_group($groups);
 
       <form class="inline" method="post" onsubmit="return addUserValid()">
         <input type="hidden" name="action" value="add">
+        <?= csrf_field() ?>
         <input type="text" name="username" id="nu" placeholder="<?= t('username') ?>" required>
         <input type="text" name="password" id="np" placeholder="<?= t('password_optional') ?>">
         <button class="btn" type="submit"><?= t('add_user') ?></button>
@@ -171,26 +288,111 @@ $active = get_active_group($groups);
       <?php if ($message): ?><div class="msg"><?= $message ?></div><?php endif; ?>
       <?php if ($error): ?><div class="err"><?= htmlspecialchars($error) ?></div><?php endif; ?>
 
+      <?php
+      // Separate active and pending users
+      $activeUsers = [];
+      $pendingUsers = [];
+      foreach ($users as $u) {
+          $isActive = !isset($u['active']) || $u['active'] === true; // Default to active for backward compatibility
+          if ($isActive) {
+              $activeUsers[] = $u;
+          } else {
+              $pendingUsers[] = $u;
+          }
+      }
+      ?>
+      
+      <?php
+      // Get pending password reset requests
+      $resetRequests = get_pending_reset_requests();
+      ?>
+      
+      <?php if (count($resetRequests) > 0): ?>
+        <div style="background:#ffe6e6; border:1px solid #ff6b6b; border-radius:8px; padding:12px; margin-bottom:16px;">
+          <h2 style="margin:0 0 8px;font-size:18px;">🔐 Password Reset Requests (<?= count($resetRequests) ?>)</h2>
+          <table>
+            <thead><tr><th><?= t('username') ?></th><th>Requested</th><th style="width:300px;"><?= t('action') ?></th></tr></thead>
+            <tbody>
+            <?php foreach ($resetRequests as $req): 
+              $reqTime = isset($req['requested_at']) ? date('Y-m-d H:i', strtotime($req['requested_at'])) : 'Unknown';
+            ?>
+              <tr>
+                <td><?= htmlspecialchars($req['username']) ?></td>
+                <td><?= htmlspecialchars($reqTime) ?></td>
+                <td class="actions">
+                  <form method="post" style="display:inline" onsubmit="return approveResetPrompt('<?= htmlspecialchars($req['username']) ?>')">
+                    <input type="hidden" name="action" value="approve_reset">
+                    <input type="hidden" name="username" value="<?= htmlspecialchars($req['username']) ?>">
+                    <input type="hidden" name="password" id="reset-pw-<?= htmlspecialchars($req['username']) ?>">
+                    <?= csrf_field() ?>
+                    <button class="btn" type="submit">✅ Approve & Set Password</button>
+                  </form>
+                  <form method="post" style="display:inline">
+                    <input type="hidden" name="action" value="reject_reset">
+                    <input type="hidden" name="username" value="<?= htmlspecialchars($req['username']) ?>">
+                    <?= csrf_field() ?>
+                    <button class="btn danger" type="submit">❌ Reject</button>
+                  </form>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      <?php endif; ?>
+
+      <?php if (count($pendingUsers) > 0): ?>
+        <div style="background:#fff3cd; border:1px solid #ffc107; border-radius:8px; padding:12px; margin-bottom:16px;">
+          <h2 style="margin:0 0 8px;font-size:18px;"><?= t('pending_users') ?> (<?= count($pendingUsers) ?>)</h2>
+          <table>
+            <thead><tr><th><?= t('username') ?></th><th style="width:220px;"><?= t('action') ?></th></tr></thead>
+            <tbody>
+            <?php foreach ($pendingUsers as $u): ?>
+              <tr>
+                <td><?= htmlspecialchars($u['username']) ?></td>
+                <td class="actions">
+                  <form method="post" style="display:inline">
+                    <input type="hidden" name="action" value="toggle_active">
+                    <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
+                    <?= csrf_field() ?>
+                    <button class="btn" type="submit"><?= t('activate_user') ?></button>
+                  </form>
+                  <a class="btn danger" href="admin.php?del=<?= urlencode($u['username']) ?>" onclick="return confirm('<?= t('delete') ?> user <?= htmlspecialchars($u['username']) ?>?')"><?= t('delete') ?></a>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      <?php endif; ?>
+
       <div class="row">
-        <h2 style="margin:0;font-size:18px;"><?= t('users') ?> (<?= count($users) ?>)</h2>
+        <h2 style="margin:0;font-size:18px;"><?= t('users') ?> (<?= count($activeUsers) ?>)</h2>
       </div>
 
       <table>
         <thead><tr><th><?= t('username') ?></th><th style="width:220px;"><?= t('action') ?></th></tr></thead>
         <tbody>
-        <?php if (!$users): ?>
-          <tr><td colspan="2">No users yet. Add some to begin.</td></tr>
-        <?php else: foreach ($users as $u): ?>
+        <?php if (!$activeUsers): ?>
+          <tr><td colspan="2">No active users yet.</td></tr>
+        <?php else: foreach ($activeUsers as $u): ?>
           <tr>
-            <td><?= htmlspecialchars($u['username']) ?><?php if ($u['username'] === 'admin'): ?> <span style="color:var(--muted); font-size:12px;">(admin)</span><?php endif; ?></td>
+            <td><?= htmlspecialchars($u['username']) ?><?php if (normalize_username($u['username']) === 'admin'): ?> <span style="color:var(--muted); font-size:12px;">(admin)</span><?php endif; ?></td>
             <td class="actions">
               <form method="post" style="display:inline" onsubmit="return changePwPrompt('<?= htmlspecialchars($u['username']) ?>')">
                 <input type="hidden" name="action" value="resetpw">
                 <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
                 <input type="hidden" name="password" id="pw-<?= htmlspecialchars($u['username']) ?>">
+                <?= csrf_field() ?>
                 <button class="btn" type="submit"><?= t('change_password') ?></button>
               </form>
-              <?php if ($u['username'] !== 'admin'): ?>
+              <?php if (normalize_username($u['username']) !== 'admin'): ?>
+                <form method="post" style="display:inline">
+                  <input type="hidden" name="action" value="toggle_active">
+                  <input type="hidden" name="username" value="<?= htmlspecialchars($u['username']) ?>">
+                  <?= csrf_field() ?>
+                  <button class="btn secondary" type="submit"><?= t('deactivate_user') ?></button>
+                </form>
                 <a class="btn danger" href="admin.php?del=<?= urlencode($u['username']) ?>" onclick="return confirm('<?= t('delete') ?> user <?= htmlspecialchars($u['username']) ?>?')"><?= t('delete') ?></a>
               <?php endif; ?>
             </td>
@@ -205,6 +407,7 @@ $active = get_active_group($groups);
       <h2 style="margin:0 0 8px;font-size:18px;"><?= t('create_draw') ?></h2>
       <form method="post" action="draw.php" onsubmit="return drawValid()" style="margin:8px 0 12px;">
         <input type="hidden" name="action" value="draw_group">
+        <?= csrf_field() ?>
         <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-bottom:10px;">
           <div style="flex:1 1 200px; min-width:150px;">
             <label for="gname" style="display:block;margin:0 0 6px; font-size:14px; font-weight:600;"><?= t('draw_name') ?></label>
@@ -228,7 +431,10 @@ $active = get_active_group($groups);
             <a href="#" onclick="toggleAll(true);return false;"><?= t('select_all') ?></a>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
-            <?php foreach ($users as $u): $n=$u['username']; if ($n === 'admin') continue; ?>
+            <?php foreach ($users as $u): 
+              $n = $u['username']; 
+              if (normalize_username($n) === 'admin') continue; 
+            ?>
               <label style="border:1px solid #eee;padding:6px 10px;border-radius:8px;font-size:14px;">
                 <input type="checkbox" class="mem" name="members[]" value="<?= htmlspecialchars($n) ?>"> <?= htmlspecialchars($n) ?>
               </label>
@@ -253,11 +459,13 @@ $active = get_active_group($groups);
                 <form method="post" style="display:inline" onsubmit="return confirm('<?= t('set_active') ?> <?= htmlspecialchars($g['name']) ?>?')">
                   <input type="hidden" name="action" value="set_active">
                   <input type="hidden" name="name" value="<?= htmlspecialchars($g['name']) ?>">
+                  <?= csrf_field() ?>
                   <button class="btn" type="submit" <?php if ($isActive) echo 'disabled'; ?>><?= t('set_active') ?></button>
                 </form>
                 <form method="post" style="display:inline" onsubmit="return confirm('<?= t('archive') ?> <?= htmlspecialchars($g['name']) ?>?')">
                   <input type="hidden" name="action" value="archive">
                   <input type="hidden" name="name" value="<?= htmlspecialchars($g['name']) ?>">
+                  <?= csrf_field() ?>
                   <button class="btn secondary" type="submit" <?php if (!$isActive) echo 'disabled'; ?>><?= t('archive') ?></button>
                 </form>
                 <a class="btn danger" href="admin.php?delgroup=<?= urlencode($g['name']) ?>" onclick="return confirm('<?= t('delete_draw') ?> <?= htmlspecialchars($g['name']) ?>?')"><?= t('delete_draw') ?></a>
@@ -312,10 +520,32 @@ $active = get_active_group($groups);
               $pairs = isset($active['pairs']) ? $active['pairs'] : [];
               $purchased = isset($active['purchased']) && is_array($active['purchased']) ? $active['purchased'] : [];
               foreach ($active['participants'] as $name) {
-                $u = null; foreach ($users as $ux){ if ($ux['username']===$name){ $u=$ux; break; } }
+                // Normalize username for lookup
+                $normalizedName = normalize_username($name);
+                $u = null; 
+                foreach ($users as $ux) { 
+                    if (normalize_username($ux['username']) === $normalizedName) { 
+                        $u = $ux; 
+                        break; 
+                    } 
+                }
                 $ints = $u ? ($u['interests'] ?? '') : '';
-                $rec = $pairs[$name] ?? '—';
-                $done = !empty($purchased[$name]);
+                // Find recipient with normalized lookup
+                $rec = '—';
+                foreach ($pairs as $key => $value) {
+                    if (normalize_username($key) === $normalizedName) {
+                        $rec = $value;
+                        break;
+                    }
+                }
+                // Find purchased status with normalized lookup
+                $done = false;
+                foreach ($purchased as $key => $val) {
+                    if (normalize_username($key) === $normalizedName) {
+                        $done = !empty($val);
+                        break;
+                    }
+                }
                 echo '<tr>';
                 echo '<td>'.htmlspecialchars($name).'</td>';
                 echo '<td>'.htmlspecialchars((string)$rec).'</td>';
@@ -327,6 +557,21 @@ $active = get_active_group($groups);
           </tbody>
         </table>
       <?php endif; ?>
+      
+      <hr style="border:none;border-top:1px solid #eee;margin:18px 0;">
+      <h2 style="margin:0 0 8px;font-size:18px;"><?= t('activity_log') ?></h2>
+      <div style="background:#f5f5f5; border-radius:8px; padding:12px; max-height:300px; overflow-y:auto; font-family:monospace; font-size:12px;">
+        <?php
+        $logEntries = get_activity_log(50);
+        if (empty($logEntries)):
+        ?>
+          <div style="color:var(--muted);"><?= t('no_activity') ?></div>
+        <?php else: ?>
+          <?php foreach (array_reverse($logEntries) as $entry): ?>
+            <div style="margin-bottom:4px; color:var(--fg);"><?= htmlspecialchars($entry) ?></div>
+          <?php endforeach; ?>
+        <?php endif; ?>
+      </div>
     </div>
   </div>
   <script>
@@ -343,6 +588,14 @@ $active = get_active_group($groups);
       if(p === null) return false;
       if(p && p.length < 4){ alert('Password must be at least 4 characters, or leave blank.'); return false; }
       var el = document.getElementById('pw-' + user);
+      if(el) el.value = p;
+      return true;
+    }
+    function approveResetPrompt(user){
+      var p = prompt('Enter new password for ' + user + ' (leave blank for random):','');
+      if(p === null) return false;
+      if(p && p.length < 4){ alert('Password must be at least 4 characters, or leave blank.'); return false; }
+      var el = document.getElementById('reset-pw-' + user);
       if(el) el.value = p;
       return true;
     }

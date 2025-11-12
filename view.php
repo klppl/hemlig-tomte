@@ -5,29 +5,34 @@ README: view.php — User view to see assigned recipient.
 - Lets user edit interests and mark purchase status (per active draw).
 */
 
-session_start();
 require_once __DIR__ . '/inc.php';
 if (empty($_SESSION['user'])) { header('Location: index.php'); exit; }
 
-$username = $_SESSION['user'];
+$username = normalize_username($_SESSION['user']);
 $pairsPath = __DIR__ . '/data/pairs.json';
 $usersPath = __DIR__ . '/data/users.json';
 
-function read_json_assoc($p){ if (!file_exists($p)) return []; $d = json_decode(file_get_contents($p), true); return is_array($d) ? $d : []; }
-function write_json_assoc($p, $d){ file_put_contents($p, json_encode($d, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES), LOCK_EX); }
+// JSON functions are defined in inc.php with retry logic and corruption recovery
 function load_groups($path){ $raw = read_json_assoc($path); return (isset($raw['groups']) && is_array($raw['groups'])) ? $raw['groups'] : []; }
 function save_groups($path, $groups){ write_json_assoc($path, ['groups'=>$groups]); }
 
 // Handle profile + purchased updates
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // CSRF protection
+    if (!validate_csrf()) {
+        // Silently fail or show error - for now redirect back
+        header('Location: view.php');
+        exit;
+    }
     // Interests are global (users.json)
     $users = read_json_assoc($usersPath);
     for ($i=0; $i<count($users); $i++) {
-        if (($users[$i]['username'] ?? null) === $username) {
+        if (normalize_username($users[$i]['username'] ?? '') === $username) {
             $interests = trim((string)($_POST['interests'] ?? ''));
             if (strlen($interests) > 1000) { $interests = substr($interests, 0, 1000); }
             $users[$i]['interests'] = $interests;
             write_json_assoc($usersPath, $users);
+            log_activity('INTERESTS_UPDATED', "Username: {$username}", $username);
             break;
         }
     }
@@ -36,8 +41,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     for ($i=0; $i<count($groups); $i++) {
         if (!empty($groups[$i]['active'])) {
             if (!isset($groups[$i]['purchased']) || !is_array($groups[$i]['purchased'])) $groups[$i]['purchased'] = [];
-            $groups[$i]['purchased'][$username] = isset($_POST['purchased']) && $_POST['purchased'] === '1';
+            $purchased = isset($_POST['purchased']) && $_POST['purchased'] === '1';
+            // Normalize username key in purchased array - remove old key if exists with different case
+            foreach ($groups[$i]['purchased'] as $key => $val) {
+                if (normalize_username($key) === $username && $key !== $username) {
+                    unset($groups[$i]['purchased'][$key]);
+                    break;
+                }
+            }
+            $groups[$i]['purchased'][$username] = $purchased;
             save_groups($pairsPath, $groups);
+            log_activity('PURCHASE_STATUS_UPDATED', "Username: {$username}, Purchased: " . ($purchased ? 'Yes' : 'No'), $username);
             break;
         }
     }
@@ -45,17 +59,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $groups = load_groups($pairsPath);
 $active = null; foreach ($groups as $g){ if (!empty($g['active'])) { $active = $g; break; } }
-$assigned = ($active && isset($active['pairs'][$username])) ? $active['pairs'][$username] : null;
+// Normalize username for lookup (pairs keys might not be normalized)
+$assigned = null;
+if ($active && isset($active['pairs'])) {
+    foreach ($active['pairs'] as $key => $value) {
+        if (normalize_username($key) === $username) {
+            $assigned = $value;
+            break;
+        }
+    }
+}
 // Fetch user record for current values
 $allUsers = read_json_assoc($usersPath);
 $me = ['interests'=>''];
-foreach ($allUsers as $u) { if (($u['username'] ?? null) === $username) { $me['interests'] = $u['interests'] ?? ''; break; } }
-// Purchased current value
-$purchased = $active && isset($active['purchased'][$username]) ? !empty($active['purchased'][$username]) : false;
+foreach ($allUsers as $u) { 
+    if (normalize_username($u['username'] ?? '') === $username) { 
+        $me['interests'] = $u['interests'] ?? ''; 
+        break; 
+    } 
+}
+// Purchased current value - check with normalized username
+$purchased = false;
+if ($active && isset($active['purchased']) && is_array($active['purchased'])) {
+    foreach ($active['purchased'] as $key => $val) {
+        if (normalize_username($key) === $username) {
+            $purchased = !empty($val);
+            break;
+        }
+    }
+}
 // Recipient interests
 $recipientInterests = '';
 if ($assigned) {
-  foreach ($allUsers as $u) { if (($u['username'] ?? null) === $assigned) { $recipientInterests = $u['interests'] ?? ''; break; } }
+    foreach ($allUsers as $u) { 
+        if (normalize_username($u['username'] ?? '') === normalize_username($assigned)) { 
+            $recipientInterests = $u['interests'] ?? ''; 
+            break; 
+        } 
+    }
 }
 ?>
 <!doctype html>
@@ -139,18 +180,30 @@ if ($assigned) {
               </div>
             <?php endif; ?>
             <?php if (isset($active['deadline'])): 
-              $deadlineDate = strtotime($active['deadline']);
-              $today = time();
-              $daysLeft = floor(($deadlineDate - $today) / (60 * 60 * 24));
-              $dateStr = date('Y-m-d', $deadlineDate);
-              $isUrgent = $daysLeft < 7;
-              $bgColor = $isUrgent ? '#ffe6e6' : '#fff9e6';
-              $borderColor = $isUrgent ? '#ff9999' : '#ffe066';
-              $textColor = $isUrgent ? '#721c24' : '#856404';
+              try {
+                // Parse deadline with timezone awareness
+                $deadlineDt = new DateTime($active['deadline']);
+                $today = new DateTime('now', new DateTimeZone('UTC'));
+                $diff = $today->diff($deadlineDt);
+                $daysLeft = $diff->invert ? -$diff->days : $diff->days;
+                $dateStr = $deadlineDt->format('Y-m-d');
+                $isUrgent = $daysLeft >= 0 && $daysLeft < 7;
+                $bgColor = $isUrgent ? '#ffe6e6' : '#fff9e6';
+                $borderColor = $isUrgent ? '#ff9999' : '#ffe066';
+                $textColor = $isUrgent ? '#721c24' : '#856404';
+              } catch (Exception $e) {
+                // Fallback for invalid dates
+                $dateStr = $active['deadline'];
+                $daysLeft = null;
+                $isUrgent = false;
+                $bgColor = '#fff9e6';
+                $borderColor = '#ffe066';
+                $textColor = '#856404';
+              }
             ?>
               <div style="background:<?= $bgColor ?>; border:1px solid <?= $borderColor ?>; border-radius:8px; padding:10px 14px; font-size:14px; color:<?= $textColor ?>;">
                 <strong style="display:block; margin-bottom:2px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:<?= $textColor ?>;"><?= t('deadline') ?></strong>
-                <span style="font-weight:600; font-size:15px;"><?= $dateStr ?><?php if ($daysLeft >= 0): ?> <span style="font-weight:500;">(<?= $daysLeft === 0 ? t('today') : ($daysLeft === 1 ? t('day_left') : sprintf(t('days_left'), $daysLeft)) ?>)</span><?php endif; ?></span>
+                <span style="font-weight:600; font-size:15px;"><?= htmlspecialchars($dateStr) ?><?php if ($daysLeft !== null && $daysLeft >= 0): ?> <span style="font-weight:500;">(<?= $daysLeft === 0 ? t('today') : ($daysLeft === 1 ? t('day_left') : sprintf(t('days_left'), $daysLeft)) ?>)</span><?php endif; ?></span>
               </div>
             <?php endif; ?>
           </div>
@@ -165,6 +218,7 @@ if ($assigned) {
                 <?= $purchased ? '✅ ' . t('purchased_status') : '❌ ' . t('not_purchased_yet') ?>
               </div>
               <form method="post" class="purchase-form" onsubmit="this.querySelector('input[type=submit]').style.display='none';">
+                <?= csrf_field() ?>
                 <input type="hidden" name="interests" value="<?= htmlspecialchars($me['interests']) ?>">
                 <div class="purchase-toggle">
                   <input type="checkbox" name="purchased" value="1" id="purchased-check" <?php if ($purchased) echo 'checked'; ?> onchange="this.form.submit();">
@@ -194,6 +248,7 @@ if ($assigned) {
 
       <div class="settings-section">
         <form method="post">
+          <?= csrf_field() ?>
           <div style="margin-bottom:12px; font-size:15px; font-weight:500; color:var(--fg); line-height:1.5;">
             <?= t('your_interests_help') ?>
           </div>
