@@ -1,0 +1,12 @@
+{
+  "groups": [
+    {
+      "name": "2025",
+      "active": true,
+      "participants": ["alice", "bob", "carol"],
+      "pairs": {"alice": "bob", "bob": "carol", "carol": "alice"},
+      "purchased": {"alice": false, "bob": false, "carol": false},
+      "created": "2025-01-01T00:00:00Z"
+    }
+  ]
+}

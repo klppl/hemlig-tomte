@@ -1,0 +1,8 @@
+[
+  { "username": "alice", "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Coffee, hiking, puzzles, board games" },
+  { "username": "bob",   "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Sci-fi books, gaming, programming" },
+  { "username": "carol", "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Baking, plants, yoga, reading" },
+  { "username": "david", "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Photography, travel, craft beer" },
+  { "username": "eve",   "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Music, concerts, vinyl records" },
+  { "username": "frank", "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", "interests": "Cooking, wine, movies" }
+]
