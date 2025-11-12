@@ -13,12 +13,15 @@
 
 ## Funktioner
 
-- 🎄 **Användarhantering**: Skapa och hantera deltagare
+- 🎄 **Användarhantering**: Skapa och hantera deltagare, aktivera/inaktivera konton
 - 🎁 **Skapa dragningar**: Skapa flera namngivna dragningar (t.ex. "2025", "2026")
-- 🔐 **Säker autentisering**: Lösenordsskyddade användarkonton
+- 🔐 **Säker autentisering**: Lösenordsskyddade användarkonton med säkra sessions
+- 🔒 **Självregistrering**: Användare kan registrera sig själva (kräver admin-aktivering)
+- 🔑 **Lösenordsåterställning**: Användare kan begära lösenordsåterställning (admin godkänner)
 - 💰 **Budget & Deadline**: Sätt maximal presentkostnad och deadlines
 - 📝 **Intresselistor**: Deltagare kan dela hobbys och intressen
 - ✅ **Köpstatus**: Markera när presenter har köpts
+- 📊 **Aktivitetslogg**: Spåra alla viktiga händelser i systemet
 - 🌍 **Flerspråkig**: Stöd för svenska och engelska
 - 🎨 **Festlig design**: Vacker jul-tematiserad användargränssnitt
 
@@ -51,50 +54,52 @@ Vid första besöket kommer du att bli ombedd att skapa ett admin-konto:
 ### Adminpanel
 
 1. Logga in med dina admin-uppgifter
-2. **Lägg till användare**: Skapa deltagarkonton
-3. **Skapa dragning**: 
+2. **Lägg till användare**: Skapa deltagarkonton manuellt eller godkänn väntande registreringar
+3. **Hantera användare**: Aktivera/inaktivera konton, ändra lösenord, radera användare
+4. **Lösenordsåterställningar**: Godkänn eller avvisa lösenordsåterställningsbegäran
+5. **Skapa dragning**: 
    - Ange dragningsnamn (t.ex. "2025")
    - Sätt valfri budget och deadline
    - Välj deltagare
    - Klicka på "Kör dragning"
-4. **Hantera dragningar**: Aktivera, arkivera eller radera dragningar
-5. **Visa status**: Se alla tilldelningar, intressen och köpstatus
+6. **Hantera dragningar**: Aktivera, arkivera eller radera dragningar
+7. **Visa status**: Se alla tilldelningar, intressen och köpstatus
+8. **Aktivitetslogg**: Granska systemaktivitet och händelser
 
 ### Användarvy
 
-1. Logga in med ditt användarnamn och lösenord
-2. Visa din tilldelade mottagare
-3. Se mottagarens intressen/hobbys
-4. Uppdatera dina egna intressen för att hjälpa din Secret Santa
-5. Markera när du har köpt din present
+1. **Registrera dig** (alternativt): Skapa ett konto på `register.php` (kräver admin-aktivering)
+2. Logga in med ditt användarnamn och lösenord
+3. Visa din tilldelade mottagare
+4. Se mottagarens intressen/hobbys
+5. Uppdatera dina egna intressen för att hjälpa din Secret Santa
+6. Markera när du har köpt din present
+7. **Glömt lösenord?**: Använd "Återställ lösenord"-länken för att begära återställning
 
 ## Filstruktur
 
 ```
-santa/
-├── index.php      # Inloggningssida & admin-installation
-├── admin.php      # Adminpanel
-├── view.php       # Användarvy
-├── draw.php       # Dragningsskapande-hanterare
-├── inc.php        # Översättningar & hjälpfunktioner
+hemlig-tomte/
+├── index.php          # Inloggningssida & admin-installation
+├── admin.php          # Adminpanel
+├── view.php           # Användarvy
+├── draw.php           # Dragningsskapande-hanterare
+├── register.php       # Användarregistrering
+├── reset.php          # Lösenordsåterställning
+├── inc.php            # Översättningar, säkerhetsfunktioner & hjälpfunktioner
 └── data/
-    ├── users.json # Användarkonton
-    └── pairs.json # Dragningsdata
+    ├── users.json            # Användarkonton
+    ├── pairs.json            # Dragningsdata
+    ├── reset_requests.json   # Lösenordsåterställningsbegäran
+    ├── activity.log          # Aktivitetslogg
+    └── .htaccess             # Skydd mot direktåtkomst till JSON-filer
 ```
-
-## Säkerhetsanteckningar
-
-- Admin-användaren kan inte raderas
-- Admin-användaren kan inte delta i dragningar
-- Lösenord hashas med PHP:s `password_hash()`
-- Sessionbaserad autentisering
-- Ändra standardlösenordet för admin efter första installationen
 
 ## Anpassning
 
-- Redigera `inc.php` för att ändra översättningar
+- Redigera `inc.php` för att ändra översättningar (svenska/engelska)
 - Modifiera CSS i varje PHP-fil för att ändra styling
-- Justera budget/deadline-funktioner efter behov
+- Justera säkerhetskonstanter i `inc.php` (t.ex. `MIN_PASSWORD_LENGTH`, `MAX_LOGIN_ATTEMPTS`)
 
 ## Licens
 
